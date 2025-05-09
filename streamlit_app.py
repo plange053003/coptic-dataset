@@ -1,66 +1,142 @@
-import altair as alt
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import re
+from collections import defaultdict
+from gensim.models import Word2Vec
 
-# Show the page title and description.
-st.set_page_config(page_title="Movies dataset", page_icon="🎬")
-st.title("🎬 Movies dataset")
-st.write(
-    """
-    This app visualizes data from [The Movie Database (TMDB)](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata).
-    It shows which movie genre performed best at the box office over the years. Just 
-    click on the widgets below to explore!
-    """
-)
+# Load model (adjust path if needed)
+from gensim.models import KeyedVectors
+model = KeyedVectors.load_word2vec_format("models/coptic_vectors_v2.vec", binary=False)
 
 
-# Load the data from a CSV. We're caching this so it doesn't reload every time the app
-# reruns (e.g. if the user interacts with the widgets).
+st.set_page_config(page_title="Coptic Word Explorer", layout="wide")
+
+# ---------- Load CSV ----------
 @st.cache_data
 def load_data():
-    df = pd.read_csv("data/movies_genres_summary.csv")
+    df = pd.read_csv("data/copticmark.csv")
+    df["Chapter"] = df["Chapter"].astype(str).str.zfill(2)
     return df
-
 
 df = load_data()
 
-# Show a multiselect widget with the genres using `st.multiselect`.
-genres = st.multiselect(
-    "Genres",
-    df.genre.unique(),
-    ["Action", "Adventure", "Biography", "Comedy", "Drama", "Horror"],
-)
+# ---------- Session State Setup ----------
+if "chapter_idx" not in st.session_state:
+    st.session_state.chapter_idx = 0
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "Coptic"
+if "selected_word" not in st.session_state:
+    st.session_state.selected_word = None
+if "selected_sentence" not in st.session_state:
+    st.session_state.selected_sentence = ("", "")
 
-# Show a slider widget with the years using `st.slider`.
-years = st.slider("Years", 1986, 2006, (2000, 2016))
+# ---------- Chapter Selection ----------
+chapters = sorted(df["Chapter"].unique().tolist())  # already zfilled and string
+current_chapter = chapters[st.session_state.chapter_idx]
+chapter_data = df[df["Chapter"] == current_chapter]
 
-# Filter the dataframe based on the widget input and reshape it.
-df_filtered = df[(df["genre"].isin(genres)) & (df["year"].between(years[0], years[1]))]
-df_reshaped = df_filtered.pivot_table(
-    index="year", columns="genre", values="gross", aggfunc="sum", fill_value=0
-)
-df_reshaped = df_reshaped.sort_values(by="year", ascending=False)
+# ---------- UI Layout ----------
+st.title("📜 Coptic Gospel Explorer")
+st.markdown("## 📖 Coptic Gospel of Mark")
+st.markdown(f"### Chapter {current_chapter}")
 
+# --- Language Switch Centered ---
+col_switch = st.columns([1, 1, 1])
+with col_switch[1]:
+    if st.button("🌍 Switch Language"):
+        st.session_state.view_mode = (
+            "English" if st.session_state.view_mode == "Coptic" else "Coptic"
+        )
+        st.session_state.selected_word = None
 
-# Display the data as a table using `st.dataframe`.
-st.dataframe(
-    df_reshaped,
-    use_container_width=True,
-    column_config={"year": st.column_config.TextColumn("Year")},
-)
+# --- Chapter Navigation Buttons ---
+col_nav = st.columns([1, 1])
+with col_nav[0]:
+    if st.button("⬅️ Previous Chapter") and st.session_state.chapter_idx > 0:
+        st.session_state.chapter_idx -= 1
+        st.session_state.selected_word = None
+with col_nav[1]:
+    if st.button("➡️ Next Chapter") and st.session_state.chapter_idx < len(chapters) - 1:
+        st.session_state.chapter_idx += 1
+        st.session_state.selected_word = None
 
-# Display the data as an Altair chart using `st.altair_chart`.
-df_chart = pd.melt(
-    df_reshaped.reset_index(), id_vars="year", var_name="genre", value_name="gross"
-)
-chart = (
-    alt.Chart(df_chart)
-    .mark_line()
-    .encode(
-        x=alt.X("year:N", title="Year"),
-        y=alt.Y("gross:Q", title="Gross earnings ($)"),
-        color="genre:N",
-    )
-    .properties(height=320)
-)
-st.altair_chart(chart, use_container_width=True)
+# ---------- Sentence Display Loop ----------
+for idx, row in chapter_data.iterrows():
+    coptic_block = row["Text"]
+    english_block = row["Translation"]
+
+    coptic_sents = [s.strip() for s in re.split(r"[.?!]", coptic_block) if s.strip()]
+    english_sents = [s.strip() for s in re.split(r"[.?!]", english_block) if s.strip()]
+
+    for sent_idx, (cop_sent, eng_sent) in enumerate(zip(coptic_sents, english_sents)):
+        st.markdown("---")
+        st.markdown(f"#### Sentence {sent_idx + 1}")
+
+        sentence = cop_sent if st.session_state.view_mode == "Coptic" else eng_sent
+        st.markdown(sentence)
+
+        words = sentence.split()
+        cols = st.columns(min(8, len(words)))
+        for i, word in enumerate(words):
+            with cols[i % 8]:
+                if st.button(word, key=f"{idx}_{sent_idx}_{i}_{word}"):
+                    st.session_state.selected_word = word
+                    st.session_state.selected_sentence = (cop_sent, eng_sent)
+
+# ---------- SIDEBAR DISPLAY ----------
+if st.session_state.selected_word:
+    word = st.session_state.selected_word
+    cop_sent, eng_sent = st.session_state.selected_sentence
+
+    st.sidebar.markdown(f"### 📌 Selected Word: `{word}`")
+    st.sidebar.markdown("#### 🧠 Translation in Context")
+
+    if st.session_state.view_mode == "Coptic":
+        highlighted = cop_sent.replace(word, f"**{word}**")
+        st.sidebar.markdown(f"**Coptic:** {highlighted}")
+        st.sidebar.markdown(f"**English:** {eng_sent}")
+    else:
+        highlighted = eng_sent.replace(word, f"**{word}**")
+        st.sidebar.markdown(f"**English:** {highlighted}")
+        st.sidebar.markdown(f"**Coptic:** {cop_sent}")
+
+    # ---------- CONTEXT TABLE IN SIDEBAR ----------
+    if st.session_state.view_mode == "Coptic":
+        # Build sentence context cache if not already present
+        if "context_sentences" not in st.session_state:
+            from collections import defaultdict
+            context_sentences = defaultdict(list)
+            for _, row in df.iterrows():
+                coptic_sents = re.split(r"[.?!]", str(row["Text"]))
+                english_sents = re.split(r"[.?!]", str(row["Translation"]))
+                for c_sent, e_sent in zip(coptic_sents, english_sents):
+                    c_sent = c_sent.strip()
+                    e_sent = e_sent.strip()
+                    for w in re.findall(r"\b\w+\b", c_sent):
+                        context_sentences[w].append((c_sent, e_sent))
+            st.session_state.context_sentences = context_sentences
+        else:
+            context_sentences = st.session_state.context_sentences
+
+        # Grab all matched sentences
+        matches = context_sentences.get(word, [])
+        if matches:
+            context_df = pd.DataFrame(matches, columns=["Coptic Sentence", "English Translation"])
+            context_df["Coptic Sentence"] = context_df["Coptic Sentence"].apply(
+                lambda s: s.replace(word, f"**{word}**")
+            )
+
+            with st.sidebar.expander(f"📖 All `{word}` Sentences"):
+                st.markdown("Coptic word usage across all chapters:")
+                st.dataframe(context_df, use_container_width=True)
+        else:
+            st.sidebar.markdown("_No other sentences found with this word._")
+
+        # ---------- COSINE SIMILARITY BLOCK ----------
+        st.sidebar.markdown("#### 🔁 Similar Coptic Words")
+        if word in model:
+            similar_words = model.most_similar(word, topn=5)
+            for sim_word, score in similar_words:
+                st.sidebar.markdown(f"- `{sim_word}` (score: {score:.2f})")
+        else:
+            st.sidebar.markdown("_This word is not in the model vocabulary._")
